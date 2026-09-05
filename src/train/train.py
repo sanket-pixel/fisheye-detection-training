@@ -60,14 +60,11 @@ def main():
     from ultralytics import YOLO
 
     model = YOLO(cfg.pop("model"))
-
+    base_name = cfg.pop("name", "run")
+    cfg["name"] = f"{base_name}_{commit[:7]}"
     # Ultralytics reads W&B settings from its own integration; tag the run
     # with provenance so the registry entry can be reconstructed later.
-    results = model.train(
-        **cfg,
-        # provenance, surfaced in the run metadata
-        **{"name": f"{cfg.get('name', 'run')}_{commit[:7]}"},
-    )
+    results = model.train(**cfg)
     print(results)
 
 
