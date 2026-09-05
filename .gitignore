@@ -5,6 +5,9 @@ venv/
 *.pt
 *.onnx
 wandb/
-data/woodscape
+runs/
+.idea/
+data/woodscape/
+data/yolo/
 .dvc/cache
-*.egg-info/data/yolo/
+*.egg-info/
