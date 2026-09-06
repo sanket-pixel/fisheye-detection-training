@@ -7,7 +7,7 @@ venv/
 wandb/
 runs/
 .idea/
-data/woodscape/
-data/yolo/
+data/raw/
+data/build/
 .dvc/cache
 *.egg-info/

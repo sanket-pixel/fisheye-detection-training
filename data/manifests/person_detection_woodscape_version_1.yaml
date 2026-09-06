@@ -1,0 +1,72 @@
+# data/manifests/person_detection_woodscape_version_1.yaml
+#
+# The single source of truth for one dataset. Every key below is required
+# and always present, regardless of task — an absent value is written as
+# `null`, never omitted. Everything under data/build/ is derived from this
+# file and is disposable.
+
+schema_version: 1
+
+identity:
+  name: person_detection_woodscape_version_1
+  description: >
+    WoodScape automotive fisheye imagery restricted to the person class,
+    for the Peppermint fisheye person detection project. Retains frames
+    containing no people as hard negatives.
+  created: 2026-09-06
+  author: sanket-shah
+
+task:
+  type: object_detection
+  modality: monocular_camera
+  camera_model: fisheye
+
+source:
+  dataset: woodscape
+  location: data/raw/woodscape
+  images: rgb_images
+  annotations: box_2d_annotations
+  annotation_format: woodscape_box_2d
+  license: non_commercial_research
+  reference: https://woodscape.valeo.com
+
+classes:
+  mapping:
+    0: person
+  source_classes:
+    - person
+  ignored_source_classes:
+    - vehicles
+    - bicycle
+    - traffic_light
+    - traffic_sign
+
+selection:
+  include_frames_without_annotations: true
+  minimum_annotation_area_pixels: null
+  maximum_annotations_per_frame: null
+  excluded_frames: []
+
+split:
+  method: random_stratified
+  stratify_by: camera_position
+  seed: 42
+  fractions:
+    train: 0.9
+    validation: 0.1
+  holdout:
+    description: >
+      The official WoodScape test partition is not included here and is
+      not touched during iteration.
+    location: null
+
+statistics:
+  total_frames: 8234
+  frames_with_annotations: 5601
+  frames_without_annotations: 2633
+  total_annotations: 16249
+  frames_by_camera_position:
+    front: 2037
+    mirror_left: 2066
+    mirror_right: 2145
+    rear: 1986
