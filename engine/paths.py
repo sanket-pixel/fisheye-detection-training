@@ -12,8 +12,8 @@ dataset loading.
 """
 from pathlib import Path
 
-# paths.py lives at <repo>/src/train/paths.py -> parents[2] is <repo>
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# paths.py lives at <repo>/src/train/paths.py -> parents[1] is <repo>
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DATA_CONFIG = REPO_ROOT / "configs" / "data.yaml"
 
