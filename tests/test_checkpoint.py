@@ -131,3 +131,14 @@ def test_provenance_survives_the_round_trip(manager, model):
     summary = describe(manager.last_path)
     assert summary["provenance"] == provenance
     assert summary["epoch"] == 0
+
+def test_best_metric_survives_resuming_from_last(tmp_path, model):
+    manager = CheckpointManager(tmp_path / "checkpoints", metric_name="fitness")
+    manager.save(model=model, epoch=0, global_step=1, metrics={"fitness": 0.9})
+    manager.save(model=model, epoch=1, global_step=2, metrics={"fitness": 0.5})
+
+    # A fresh manager resuming from last.pt, which holds the worse epoch
+    fresh = CheckpointManager(tmp_path / "checkpoints", metric_name="fitness")
+    state = fresh.resume(model=model)
+    assert state.best_metric == 0.9
+    assert fresh.best_metric == 0.9

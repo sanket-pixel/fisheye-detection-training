@@ -125,18 +125,18 @@ class CheckpointManager:
     # -- writing -------------------------------------------------------
 
     def save(
-        self,
-        *,
-        model: Any,
-        epoch: int,
-        global_step: int,
-        optimizer: Any = None,
-        scheduler: Any = None,
-        scaler: Any = None,
-        model_exponential_moving_average: Any = None,
-        metrics: dict[str, float] | None = None,
-        provenance: dict[str, Any] | None = None,
-        extra: dict[str, Any] | None = None,
+            self,
+            *,
+            model: Any,
+            epoch: int,
+            global_step: int,
+            optimizer: Any = None,
+            scheduler: Any = None,
+            scaler: Any = None,
+            model_exponential_moving_average: Any = None,
+            metrics: dict[str, float] | None = None,
+            provenance: dict[str, Any] | None = None,
+            extra: dict[str, Any] | None = None,
     ) -> Path:
         """
         Write `last`, and `best` when the tracked metric has improved.
@@ -144,6 +144,16 @@ class CheckpointManager:
         Returns the path of the checkpoint written for this epoch.
         """
         metrics = metrics or {}
+
+        # Update the running best before writing anything, and record it in
+        # every checkpoint. Resuming from last.pt must restore the best seen
+        # so far; otherwise the first evaluation after a resume overwrites
+        # best.pt with whatever it scores, even if an earlier epoch was better.
+        tracked = metrics.get(self.metric_name)
+        improved = tracked is not None and self.is_better(tracked)
+        if improved:
+            self.best_metric = tracked
+
         payload: dict[str, Any] = {
             "epoch": epoch,
             "global_step": global_step,
@@ -155,6 +165,7 @@ class CheckpointManager:
                 model_exponential_moving_average
             ),
             "metrics": metrics,
+            "best_metric": self.best_metric,
             "provenance": provenance or {},
             "extra": extra or {},
         }
@@ -164,7 +175,6 @@ class CheckpointManager:
         temporary_path = self.last_path.with_suffix(".tmp")
         torch.save(payload, temporary_path)
         temporary_path.replace(self.last_path)
-
         written = self.last_path
 
         if self.keep_last_n_epochs > 0:
@@ -173,12 +183,9 @@ class CheckpointManager:
             self._prune_epoch_checkpoints(epoch)
             written = epoch_path
 
-        tracked = metrics.get(self.metric_name)
-        if tracked is not None and self.is_better(tracked):
-            self.best_metric = tracked
-            payload["best_metric"] = tracked
+        if improved:
             temporary_best = self.best_path.with_suffix(".tmp")
-            torch.save(payload, temporary_best)
+            shutil.copyfile(self.last_path, temporary_best)
             temporary_best.replace(self.best_path)
 
         return written

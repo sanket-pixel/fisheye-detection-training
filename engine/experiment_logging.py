@@ -30,7 +30,8 @@ from typing import Any, Protocol
 LOGGER_NAME = "training"
 METRICS_FILE_NAME = "metrics.jsonl"
 CONFIGURATION_FILE_NAME = "configuration.json"
-
+CONSOLE_LOG_FILE_NAME = "console.log"
+CONSOLE_HANDLER_NAME = "training_console"
 
 def _to_float(value: Any) -> float:
     """Accept Python numbers and zero-dimensional tensors without importing torch."""
@@ -49,15 +50,15 @@ def configure_console_logging(level: int = logging.INFO) -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
 
-    if not logger.handlers:
+    if not any(handler.get_name() == CONSOLE_HANDLER_NAME for handler in logger.handlers):
         handler = logging.StreamHandler(sys.stdout)
+        handler.set_name(CONSOLE_HANDLER_NAME)
         handler.setFormatter(
             logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
         )
         logger.addHandler(handler)
 
     return logger
-
 
 # --------------------------------------------------------------------------
 # Experiment trackers
@@ -202,17 +203,30 @@ class RunLogger:
     """
 
     def __init__(
-        self,
-        run_directory: str | Path,
-        tracker: ExperimentTracker | None = None,
-        console: logging.Logger | None = None,
+            self,
+            run_directory: str | Path,
+            tracker: ExperimentTracker | None = None,
+            console: logging.Logger | None = None,
     ) -> None:
         self.run_directory = Path(run_directory)
         self.run_directory.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.run_directory / METRICS_FILE_NAME
+        self.console_log_path = self.run_directory / CONSOLE_LOG_FILE_NAME
         self.tracker = tracker or NullTracker()
         self.console = console or configure_console_logging()
         self._start_time: float | None = None
+
+        # Everything printed during the run is also kept with the run, so a
+        # warning at epoch 63 survives the terminal closing.
+        self._file_handler: logging.FileHandler | None = logging.FileHandler(
+            self.console_log_path
+        )
+        self._file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s  %(levelname)-7s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            )
+        )
+        self.console.addHandler(self._file_handler)
 
     def __enter__(self) -> "RunLogger":
         return self
@@ -276,3 +290,11 @@ class RunLogger:
         if self._start_time is not None:
             self.console.info(f"finished in {self.elapsed_seconds / 60:.1f} min")
             self._start_time = None
+        self._close_file_handler()
+
+    def _close_file_handler(self) -> None:
+        """Detach so a later run in the same process does not write into this log."""
+        if self._file_handler is not None:
+            self.console.removeHandler(self._file_handler)
+            self._file_handler.close()
+            self._file_handler = None

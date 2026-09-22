@@ -7,6 +7,12 @@ MANIFEST  ?= data/manifests/person_detection_woodscape_version_1.yaml
 PARTITION ?= train
 LIMIT     ?= 300
 
+# ROS setup scripts put /opt/ros/<distro>/.../site-packages on PYTHONPATH,
+# which leaks Python 3.12 packages and pytest plugins into this Python 3.11
+# environment. Keep this project isolated from it.
+unexport PYTHONPATH
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
+
 # Assumes the manifest filename matches identity.name inside it.
 MANIFEST_NAME   := $(basename $(notdir $(MANIFEST)))
 BUILD_DIRECTORY := data/build/$(MANIFEST_NAME)
@@ -14,7 +20,7 @@ BUILD_INFO      := $(BUILD_DIRECTORY)/build_info.json
 BUILD_SOURCES   := tools/data/build_dataset.py src/data/source_readers.py engine/data_manifest.py
 
 .DEFAULT_GOAL := help
-.PHONY: help dataset dataset-rebuild inspect inspect-source test test-fast clean
+.PHONY: help dataset dataset-rebuild inspect inspect-source test test-fast clean make toy-gate
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -37,12 +43,13 @@ inspect-source: ## Open the raw source annotations in FiftyOne
 		--stage source --limit $(LIMIT)
 
 test: dataset ## Run the full test suite
-	$(PYTHON) -m pytest tests/ -v -p no:launch_testing
+	$(PYTHON) -m pytest tests/ -v
 
 test-fast: ## Run tests that do not need the built dataset
-	$(PYTHON) -m pytest tests/ -v -p no:launch_testing \
-		--ignore=tests/test_dataset_build.py
+	$(PYTHON) -m pytest tests/ -v --ignore=tests/test_dataset_build.py
 
+toy-gate: ## Run the engine's toy training gate with output visible
+	$(PYTHON) -m pytest tests/test_trainer.py -v -s
 clean: ## Remove derived artifacts and caches
 	rm -rf data/build .pytest_cache
 	find . -path ./.venv -prune -o -name __pycache__ -type d -exec rm -rf {} +

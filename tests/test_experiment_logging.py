@@ -87,3 +87,27 @@ def test_invalid_weights_and_biases_mode_is_rejected():
 
 def test_none_tracker_is_null():
     assert isinstance(create_tracker("none"), NullTracker)
+
+def test_console_output_is_saved_with_the_run(tmp_path):
+    with RunLogger(tmp_path / "run") as logger:
+        logger.start("test_run", {})
+        logger.info("a message worth keeping")
+
+    content = (tmp_path / "run" / "console.log").read_text()
+    assert "a message worth keeping" in content
+    assert "finished in" in content
+
+
+def test_crash_is_recorded_and_logs_stay_separate(tmp_path):
+    with pytest.raises(RuntimeError):
+        with RunLogger(tmp_path / "first") as logger:
+            logger.start("first", {})
+            raise RuntimeError("simulated crash")
+
+    with RunLogger(tmp_path / "second") as logger:
+        logger.start("second", {})
+        logger.info("only in the second run")
+
+    first = (tmp_path / "first" / "console.log").read_text()
+    assert "simulated crash" in first
+    assert "only in the second run" not in first

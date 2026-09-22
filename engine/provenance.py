@@ -1,34 +1,56 @@
 # engine/provenance.py
 """
-Run provenance: everything needed to reconstruct a training run later.
+Run provenance: what code produced a run, on which machine, and when.
 
-A run is identified by (code, data, config). If any of those can't be
-pinned, the resulting weights are scratch output, not a model — so this
-module is what the trainer consults before spending GPU time.
+Responsibilities are split with engine/configuration.py:
 
-No torch imports here on purpose: this is pure metadata and must stay
-cheap to import and trivial to test.
+    configuration   what the run was told to do, and on which data:
+                    settings, overrides, manifest hash, configuration hashes
+    provenance      what code ran it, where, and when:
+                    git commit and state, library versions, hardware
+
+Both are written together to runs/<run_id>/configuration.json and embedded
+in every checkpoint, so a model file found on its own can still be traced
+back to its code, settings, and data.
+
+Torch is imported lazily and only to read versions and device information,
+so this module stays cheap to import and works where torch is absent.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import platform
+import re
+import socket
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from engine.paths import REPO_ROOT
 
 
-# ---------- git ----------
+class ProvenanceError(RuntimeError):
+    """Raised when provenance cannot be established or a run must not start."""
 
-def _git(*args: str) -> str:
-    return subprocess.check_output(
-        ["git", *args], cwd=REPO_ROOT, text=True, stderr=subprocess.DEVNULL
-    ).strip()
+
+# --------------------------------------------------------------------------
+# Git
+# --------------------------------------------------------------------------
+
+
+def _git(*arguments: str) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *arguments], cwd=REPO_ROOT, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as error:
+        raise ProvenanceError(
+            f"`git {' '.join(arguments)}` failed; is {REPO_ROOT} a git repository?"
+        ) from error
 
 
 def git_commit() -> str:
@@ -39,100 +61,160 @@ def git_branch() -> str:
     return _git("rev-parse", "--abbrev-ref", "HEAD")
 
 
-def git_is_dirty() -> bool:
-    """True if tracked files are modified or untracked files exist."""
-    return bool(_git("status", "--porcelain"))
-
-
 def git_dirty_files() -> list[str]:
-    """Which files make the tree dirty — so the error message is actionable."""
-    out = _git("status", "--porcelain")
-    return [line[3:] for line in out.splitlines()] if out else []
+    """Files that make the working tree dirty: modified, staged, or untracked."""
+    output = _git("status", "--porcelain")
+    return [line[3:] for line in output.splitlines()] if output else []
 
 
-# ---------- hashing ----------
-
-def hash_file(path: str | Path) -> str:
-    """SHA256 of a file's bytes. Used to pin configs and manifests."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def hash_dict(d: dict) -> str:
-    """Stable hash of a config dict, independent of key ordering."""
-    payload = json.dumps(d, sort_keys=True, default=str).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-# ---------- record ----------
-
-@dataclass
-class RunProvenance:
-    run_id: str
-    timestamp: str
-    git_commit: str
-    git_branch: str
-    git_dirty: bool
-    config_path: str
-    config_hash: str
-    data_config_path: str | None
-    data_config_hash: str | None
-    manifest_path: str | None
-    manifest_hash: str | None
-    seed: int
-    python_version: str
-    platform: str
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    def save(self, path: str | Path) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
-
-
-def build_provenance(
-    config_path: str | Path,
-    config: dict,
-    seed: int,
-    data_config_path: str | Path | None = None,
-    manifest_path: str | Path | None = None,
-) -> RunProvenance:
-    """Collect everything identifying this run. Call once, at startup."""
-    commit = git_commit()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-    return RunProvenance(
-        run_id=f"{ts}_{commit[:7]}",
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        git_commit=commit,
-        git_branch=git_branch(),
-        git_dirty=git_is_dirty(),
-        config_path=str(config_path),
-        config_hash=hash_dict(config),
-        data_config_path=str(data_config_path) if data_config_path else None,
-        data_config_hash=hash_file(data_config_path) if data_config_path else None,
-        manifest_path=str(manifest_path) if manifest_path else None,
-        manifest_hash=hash_file(manifest_path) if manifest_path else None,
-        seed=seed,
-        python_version=sys.version.split()[0],
-        platform=platform.platform(),
-    )
+def git_is_dirty() -> bool:
+    return bool(git_dirty_files())
 
 
 def require_clean_tree(allow_dirty: bool = False) -> None:
     """Refuse to start an unreproducible run unless explicitly overridden."""
-    if not git_is_dirty() or allow_dirty:
+    if allow_dirty:
         return
     files = git_dirty_files()
+    if not files:
+        return
     preview = "\n  ".join(files[:10])
     more = f"\n  ... and {len(files) - 10} more" if len(files) > 10 else ""
-    raise RuntimeError(
-        f"Working tree is dirty — this run would not be reproducible.\n"
+    raise ProvenanceError(
+        "Working tree is dirty — this run would not be reproducible.\n"
         f"  {preview}{more}\n"
-        f"Commit your changes, or pass allow_dirty=True for a throwaway run."
+        "Commit your changes, or allow a dirty tree explicitly for a throwaway run."
+    )
+
+
+# --------------------------------------------------------------------------
+# Hashing — used by configuration, dataset builds, and checkpoints
+# --------------------------------------------------------------------------
+
+
+def hash_file(path: str | Path) -> str:
+    """SHA-256 of a file's bytes."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(8192), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def hash_dict(dictionary: dict[str, Any]) -> str:
+    """SHA-256 of a dictionary's content, independent of key order."""
+    payload = json.dumps(dictionary, sort_keys=True, default=str).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Environment
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnvironmentRecord:
+    """
+    Software and hardware a run executed on.
+
+    Worth recording because results can shift by fractions of a point across
+    torch or CUDA versions through nondeterministic kernels, and "it got
+    worse after the upgrade" is only diagnosable if the versions were kept.
+    """
+
+    python_version: str
+    platform: str
+    hostname: str
+    torch_version: str | None
+    cuda_version: str | None
+    cudnn_version: int | None
+    device_name: str
+    device_count: int
+
+
+def capture_environment() -> EnvironmentRecord:
+    torch_version: str | None = None
+    cuda_version: str | None = None
+    cudnn_version: int | None = None
+    device_name = "cpu"
+    device_count = 0
+
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    if torch is not None:
+        torch_version = torch.__version__
+        cuda_version = torch.version.cuda
+        if torch.backends.cudnn.is_available():
+            cudnn_version = torch.backends.cudnn.version()
+        if torch.cuda.is_available():
+            device_count = torch.cuda.device_count()
+            device_name = torch.cuda.get_device_name(0)
+
+    return EnvironmentRecord(
+        python_version=sys.version.split()[0],
+        platform=platform.platform(),
+        hostname=socket.gethostname(),
+        torch_version=torch_version,
+        cuda_version=cuda_version,
+        cudnn_version=cudnn_version,
+        device_name=device_name,
+        device_count=device_count,
+    )
+
+
+# --------------------------------------------------------------------------
+# The record
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunProvenance:
+    run_id: str
+    started_at: str
+    git_commit: str
+    git_branch: str
+    git_dirty: bool
+    git_dirty_files: tuple[str, ...]
+    environment: EnvironmentRecord
+
+    def to_dictionary(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _sanitise_label(label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_")
+
+
+def build_provenance(label: str | None = None) -> RunProvenance:
+    """
+    Collect provenance for a run. Call once, at startup.
+
+    The run id is `<UTC timestamp>_<short commit>[_dirty][_<label>]`, so a
+    run directory's name alone says when it ran, from which code, whether
+    that code was committed, and what the run was called.
+    """
+    started_at = datetime.now(timezone.utc)
+    commit = git_commit()
+    dirty_files = tuple(git_dirty_files())
+    dirty = bool(dirty_files)
+
+    parts = [started_at.strftime("%Y%m%d_%H%M%S"), commit[:7]]
+    if dirty:
+        parts.append("dirty")
+    if label:
+        sanitised = _sanitise_label(label)
+        if sanitised:
+            parts.append(sanitised)
+
+    return RunProvenance(
+        run_id="_".join(parts),
+        started_at=started_at.isoformat(),
+        git_commit=commit,
+        git_branch=git_branch(),
+        git_dirty=dirty,
+        git_dirty_files=dirty_files,
+        environment=capture_environment(),
     )
